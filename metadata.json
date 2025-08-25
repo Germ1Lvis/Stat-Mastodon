@@ -1,0 +1,5 @@
+{
+  "name": "Mastodon Stats Viewer",
+  "description": "An application to view post statistics (likes, replies, reposts) for a public Mastodon account using its ActivityPub handle.",
+  "requestFramePermissions": []
+}
