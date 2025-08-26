@@ -1,9 +1,10 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { Account, Status } from './types';
 import { fetchAccountAndStatuses } from './services/mastodonService';
 import Loader from './components/Loader';
 import ErrorMessage from './components/ErrorMessage';
+import StatCard from './components/StatCard';
 import { MastodonLogo } from './constants';
 
 // Déclare la variable globale XLSX pour TypeScript, car elle est chargée depuis un CDN.
@@ -20,6 +21,8 @@ const App: React.FC = () => {
   const handleSearch = useCallback(async () => {
     setIsLoading(true);
     setError(null);
+    setAccount(null);
+    setStatuses([]);
     
     // Le compte est maintenant codé en dur pour une fiabilité maximale.
     const mastodonHandle = 'pogscience.bsky.social@bsky.brid.gy';
@@ -53,6 +56,10 @@ const App: React.FC = () => {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     return doc.body.textContent || "";
   };
+
+  const hasMedia = (status: Status): boolean => status.media_attachments.length > 0;
+  const countLinks = (content: string): number => (stripHtml(content).match(/https?:\/\/[^\s]+/g) || []).length;
+  const countHashtags = (content: string): number => (stripHtml(content).match(/#\w+/g) || []).length;
   
   const handleExport = () => {
     if (typeof XLSX === 'undefined' || !account) {
@@ -67,6 +74,9 @@ const App: React.FC = () => {
         'Réponses': status.replies_count,
         'Reposts': status.reblogs_count,
         'Favoris': status.favourites_count,
+        'Média': hasMedia(status) ? 'Oui' : 'Non',
+        'Liens': countLinks(status.content),
+        'Hashtags': countHashtags(status.content),
         'Lien': status.url
     }));
 
@@ -75,6 +85,19 @@ const App: React.FC = () => {
     XLSX.utils.book_append_sheet(workbook, worksheet, "Statistiques Mastodon");
     XLSX.writeFile(workbook, `${account.acct.replace('@', '_')}_stats.xlsx`);
   };
+
+  const summaryStats = useMemo(() => {
+    if (statuses.length === 0) return null;
+
+    return {
+      totalPosts: statuses.length,
+      totalReplies: statuses.reduce((sum, s) => sum + s.replies_count, 0),
+      totalReposts: statuses.reduce((sum, s) => sum + s.reblogs_count, 0),
+      totalFavourites: statuses.reduce((sum, s) => sum + s.favourites_count, 0),
+      postsWithMedia: statuses.filter(hasMedia).length,
+      postsWithLinks: statuses.filter(s => countLinks(s.content) > 0).length,
+    };
+  }, [statuses]);
 
   return (
     <div className="min-h-screen bg-brand-bg font-sans p-4 sm:p-6 md:p-8">
@@ -118,7 +141,7 @@ const App: React.FC = () => {
               <div className="flex gap-4">
                   <button
                       onClick={handleSearch}
-                      disabled={isLoading}
+                      disabled={isLoading || !startDate || !endDate}
                       className="bg-mastodon-purple text-white font-bold py-2 px-4 rounded-md hover:bg-opacity-90 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-brand-bg focus:ring-mastodon-purple disabled:bg-gray-500 disabled:cursor-not-allowed"
                   >
                       {isLoading ? 'Recherche...' : 'Rechercher'}
@@ -152,6 +175,17 @@ const App: React.FC = () => {
                 </div>
               </div>
 
+              {summaryStats && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+                  <StatCard title="Posts" value={summaryStats.totalPosts} />
+                  <StatCard title="Total Réponses" value={summaryStats.totalReplies} />
+                  <StatCard title="Total Reposts" value={summaryStats.totalReposts} />
+                  <StatCard title="Total Favoris" value={summaryStats.totalFavourites} />
+                  <StatCard title="Posts avec Média" value={summaryStats.postsWithMedia} />
+                  <StatCard title="Posts avec Liens" value={summaryStats.postsWithLinks} />
+                </div>
+              )}
+
               {statuses.length > 0 ? (
                 <div className="overflow-x-auto rounded-lg border border-gray-700">
                     <table className="min-w-full divide-y divide-gray-700">
@@ -162,6 +196,9 @@ const App: React.FC = () => {
                                 <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Réponses</th>
                                 <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Reposts</th>
                                 <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Favoris</th>
+                                <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Média</th>
+                                <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Liens</th>
+                                <th scope="col" className="py-3.5 px-4 text-center text-sm font-semibold text-brand-text">Hashtags</th>
                                 <th scope="col" className="py-3.5 px-4 text-left text-sm font-semibold text-brand-text">Lien</th>
                             </tr>
                         </thead>
@@ -169,10 +206,13 @@ const App: React.FC = () => {
                             {statuses.map(status => (
                                 <tr key={status.id} className="hover:bg-brand-surface/80">
                                     <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary">{new Date(status.created_at).toLocaleDateString('fr-FR')}</td>
-                                    <td className="px-4 py-4 text-sm text-brand-text max-w-md truncate" title={stripHtml(status.content)}>{stripHtml(status.content)}</td>
+                                    <td className="px-4 py-4 text-sm text-brand-text max-w-sm truncate" title={stripHtml(status.content)}>{stripHtml(status.content)}</td>
                                     <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{status.replies_count.toLocaleString('fr-FR')}</td>
                                     <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{status.reblogs_count.toLocaleString('fr-FR')}</td>
                                     <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{status.favourites_count.toLocaleString('fr-FR')}</td>
+                                    <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{hasMedia(status) ? '✅' : ''}</td>
+                                    <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{countLinks(status.content)}</td>
+                                    <td className="whitespace-nowrap px-4 py-4 text-sm text-brand-text-secondary text-center">{countHashtags(status.content)}</td>
                                     <td className="whitespace-nowrap px-4 py-4 text-sm">
                                         <a href={status.url} target="_blank" rel="noopener noreferrer" className="text-mastodon-purple hover:underline">Voir</a>
                                     </td>

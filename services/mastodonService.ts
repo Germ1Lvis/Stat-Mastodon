@@ -7,28 +7,13 @@ interface FetchResult {
 
 // Utilisation d'un proxy CORS pour contourner les restrictions de sécurité des navigateurs.
 const PROXY_URL = 'https://corsproxy.io/?';
-// Utiliser une instance publique fiable pour résoudre les comptes fédérés.
-const RESOLVER_INSTANCE = 'mas.to';
+
+// Instance publique et fiable utilisée pour "résoudre" les identifiants Mastodon et obtenir l'ID canonique d'un compte.
+// mastodon.social est utilisé car c'est l'une des plus grandes instances, garantissant la meilleure couverture fédérée possible.
+const RESOLVER_INSTANCE = 'mastodon.social';
 
 // Fonction d'aide pour créer une URL passant par le proxy
 const proxify = (url: string) => `${PROXY_URL}${encodeURIComponent(url)}`;
-
-// Fonction d'aide pour analyser l'en-tête 'Link' pour la pagination
-function parseLinkHeader(linkHeader: string | null): { next?: string } {
-  if (!linkHeader) {
-    return {};
-  }
-  const links: { [key: string]: string } = {};
-  const entries = linkHeader.split(',');
-  entries.forEach(entry => {
-    const match = entry.match(/<(.+?)>; rel="(.+?)"/);
-    if (match) {
-      const [, url, rel] = match;
-      links[rel] = url;
-    }
-  });
-  return links;
-}
 
 export async function fetchAccountAndStatuses(
   username: string,
@@ -39,7 +24,7 @@ export async function fetchAccountAndStatuses(
   try {
     const fullHandle = `${username}@${instance}`;
     
-    // Étape 1 : Utiliser le résolveur public pour obtenir l'ID du compte de manière fiable.
+    // Étape 1 : Utiliser un résolveur public pour obtenir l'ID du compte.
     const lookupApiUrl = `https://${RESOLVER_INSTANCE}/api/v1/accounts/lookup?acct=${fullHandle}`;
     const lookupUrl = proxify(lookupApiUrl);
     
@@ -51,96 +36,88 @@ export async function fetchAccountAndStatuses(
             const errorBody = await lookupResponse.json();
             errorDetails = errorBody.error || JSON.stringify(errorBody);
         } catch (e) { /* no-op */ }
-        throw new Error(`Le compte ${fullHandle} n'a pas pu être trouvé via le résolveur (${RESOLVER_INSTANCE}). L'API a retourné une erreur. ${errorDetails}`);
+        throw new Error(`Le compte ${fullHandle} n'a pas pu être trouvé via le résolveur public (${RESOLVER_INSTANCE}). L'API a retourné une erreur. ${errorDetails}`);
     }
 
     const account: Account = await lookupResponse.json();
     
-    // Vérification de sécurité pour s'assurer que le compte retourné est le bon.
     if (account.acct.toLowerCase() !== fullHandle.toLowerCase() && account.acct.toLowerCase() !== username.toLowerCase()) {
         throw new Error(`Un compte a été trouvé, mais une vérification de sécurité a échoué. Attendu: ${fullHandle}, Reçu: ${account.acct}.`);
     }
 
-    // Étape 2 : Récupérer les statuts via le résolveur public, car l'ID n'est valide que sur cette instance.
+    // Étape 2 : Préparer et effectuer la requête pour les statuts avec une pagination manuelle robuste.
     const allStatuses: Status[] = [];
     const MAX_PAGES_TO_FETCH = 50; 
     const DELAY_BETWEEN_REQUESTS_MS = 300;
     let pagesFetched = 0;
     
-    const start = startDate ? new Date(`${startDate}T00:00:00.000Z`) : null;
-    const end = endDate ? new Date(`${endDate}T23:59:59.999Z`) : null;
-
-    const statusesParams = new URLSearchParams({
+    const baseStatusesUrl = `https://${RESOLVER_INSTANCE}/api/v1/accounts/${account.id}/statuses`;
+    const baseParams = new URLSearchParams({
         limit: '40',
+        exclude_replies: 'true',
+        exclude_reblogs: 'true',
     });
     
-    // Utiliser l'instance de résolution pour cet appel, car l'ID du compte vient de là.
-    let nextUrl: string | undefined = `https://${RESOLVER_INSTANCE}/api/v1/accounts/${account.id}/statuses?${statusesParams.toString()}`;
+    let currentParams = new URLSearchParams(baseParams);
 
-    while (nextUrl && pagesFetched < MAX_PAGES_TO_FETCH) {
-      const statusesUrl = proxify(nextUrl);
+    // Préparation pour la logique de filtrage côté client et l'optimisation de l'arrêt.
+    const startFilter = startDate ? new Date(`${startDate}T00:00:00.000Z`) : null;
+    const endFilter = endDate ? new Date(`${endDate}T23:59:59.999Z`) : null;
+    
+    while (pagesFetched < MAX_PAGES_TO_FETCH) {
+      const statusesApiUrl = `${baseStatusesUrl}?${currentParams.toString()}`;
+      const statusesUrl = proxify(statusesApiUrl);
       const statusesResponse = await fetch(statusesUrl);
 
       if (!statusesResponse.ok) {
-        if (statusesResponse.status === 429) {
-          throw new Error(`L'API a renvoyé une erreur "Too Many Requests" (429) lors de la récupération des posts. Le serveur est surchargé. Veuillez patienter avant de réessayer.`);
-        }
-        let errorDetails = `statut: ${statusesResponse.status}`;
-        try {
-            const errorBody = await statusesResponse.json();
-            errorDetails = errorBody.error || JSON.stringify(errorBody);
-        } catch (e) { /* no-op */ }
-        throw new Error(`Erreur lors de la récupération des posts via le résolveur (${RESOLVER_INSTANCE}). ${errorDetails}`);
+        throw new Error(`Erreur lors de la récupération des posts depuis ${RESOLVER_INSTANCE}. statut: ${statusesResponse.status}`);
       }
       
-      const newStatuses: Status[] = await statusesResponse.json();
-      if (newStatuses.length === 0) {
-        break; // Plus de statuts à récupérer
+      const pageStatuses: Status[] = await statusesResponse.json();
+      if (pageStatuses.length === 0) {
+        break; // Plus de posts à charger, fin de la pagination.
       }
-
-      allStatuses.push(...newStatuses);
       
-      // Optimisation : arrêter la pagination si on dépasse la date de début
-      if (start) {
-        const lastStatusDate = new Date(newStatuses[newStatuses.length - 1].created_at);
-        if (lastStatusDate < start) {
+      let shouldStopFetching = false;
+      for (const status of pageStatuses) {
+        const statusDate = new Date(status.created_at);
+        
+        // Optimisation : si on atteint un post plus ancien que la date de début, on peut arrêter.
+        if (startFilter && statusDate < startFilter) {
+          shouldStopFetching = true;
           break;
         }
+
+        // Filtrage côté client : garantit que seuls les posts strictement dans la plage sont conservés.
+        const isAfterStart = startFilter ? statusDate >= startFilter : true;
+        const isBeforeEnd = endFilter ? statusDate <= endFilter : true;
+        
+        if (isAfterStart && isBeforeEnd) {
+          allStatuses.push(status);
+        }
       }
 
-      const linkHeader = statusesResponse.headers.get('Link');
-      const links = parseLinkHeader(linkHeader);
-      nextUrl = links.next;
+      if (shouldStopFetching) {
+        break;
+      }
+      
+      // Préparer la page suivante en utilisant l'ID du dernier statut (max_id).
+      // C'est la méthode de pagination la plus fiable.
+      const lastId = pageStatuses[pageStatuses.length - 1].id;
+      currentParams.set('max_id', lastId);
       
       pagesFetched++;
-
-      if (nextUrl) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS_MS));
-      }
+      
+      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS_MS));
     }
-    
-    // Filtrage final en mémoire pour une précision parfaite
-    const filteredStatuses = allStatuses.filter(status => {
-      const statusDate = new Date(status.created_at);
-      if (start && statusDate < start) {
-        return false;
-      }
-      if (end && statusDate > end) {
-        return false;
-      }
-      return true;
-    });
 
-    return { account, statuses: filteredStatuses };
+    return { account, statuses: allStatuses };
 
   } catch (error) {
     console.error("Mastodon API Error:", error);
     if (error instanceof Error) {
-        if (error.message.includes('Failed to fetch')) {
-            throw new Error('Une erreur réseau est survenue. Cela peut être dû à un problème de connexion, un bloqueur de publicité, ou le proxy CORS qui est temporairement indisponible.');
-        }
-        throw error;
+        throw new Error(error.message);
     }
-    throw new Error('Une erreur inconnue est survenue.');
+    throw new Error('Une erreur réseau ou API inattendue est survenue.');
   }
 }
