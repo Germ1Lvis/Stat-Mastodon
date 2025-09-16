@@ -1,19 +1,55 @@
-import { Account, Status } from './types';
+import { Account, Status } from '../types';
 
 interface FetchResult {
   account: Account;
   statuses: Status[];
 }
 
-// Utilisation d'un proxy CORS pour contourner les restrictions de sécurité des navigateurs.
-const PROXY_URL = 'https://corsproxy.io/?';
+// Liste de proxies CORS pour améliorer la fiabilité.
+// Chaque fonction prend une URL et retourne une URL "proxifiée".
+const PROXIES = [
+  (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
+];
 
 // Instance publique et fiable utilisée pour "résoudre" les identifiants Mastodon et obtenir l'ID canonique d'un compte.
 // mastodon.social est utilisé car c'est l'une des plus grandes instances, garantissant la meilleure couverture fédérée possible.
 const RESOLVER_INSTANCE = 'mastodon.social';
 
-// Fonction d'aide pour créer une URL passant par le proxy
-const proxify = (url: string) => `${PROXY_URL}${encodeURIComponent(url)}`;
+const shuffleArray = <T>(array: T[]): T[] => {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+};
+
+async function fetchWithProxyFallbacks(url: string, options: RequestInit): Promise<Response> {
+    const shuffledProxies = shuffleArray([...PROXIES]);
+    const errors: string[] = [];
+
+    for (const proxyBuilder of shuffledProxies) {
+        const proxiedUrl = proxyBuilder(url);
+        const proxyHost = new URL(proxiedUrl).hostname;
+        try {
+            console.log(`Tentative de fetch via le proxy : ${proxyHost}`);
+            const response = await fetch(proxiedUrl, options);
+            if (!response.ok) {
+                throw new Error(`La requête via le proxy a échoué avec le statut : ${response.status}`);
+            }
+            console.log(`Fetch réussi avec le proxy : ${proxyHost}`);
+            return response;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.warn(`Échec du fetch avec le proxy ${proxyHost}. Erreur : ${errorMessage}`);
+            errors.push(`${proxyHost}: ${errorMessage}`);
+        }
+    }
+
+    throw new Error(`Tous les proxies CORS ont échoué. Impossible de récupérer les données. Erreurs : ${errors.join('; ')}`);
+}
+
 
 export async function fetchAccountAndStatuses(
   username: string,
@@ -26,11 +62,10 @@ export async function fetchAccountAndStatuses(
     
     // Étape 1 : Utiliser un résolveur public pour obtenir l'ID du compte.
     const lookupApiUrl = `https://${RESOLVER_INSTANCE}/api/v1/accounts/lookup?acct=${fullHandle}`;
-    const lookupUrl = proxify(lookupApiUrl);
     
-    const lookupResponse = await fetch(lookupUrl);
+    const lookupResponse = await fetchWithProxyFallbacks(lookupApiUrl, { cache: 'no-store' });
 
-    if (!lookupResponse.ok) {
+    if (!lookupResponse.ok) { // Cette vérification est techniquement redondante avec fetchWithProxyFallbacks mais gardée pour la robustesse
         let errorDetails = `statut: ${lookupResponse.status}`;
         try {
             const errorBody = await lookupResponse.json();
@@ -66,8 +101,7 @@ export async function fetchAccountAndStatuses(
     
     while (pagesFetched < MAX_PAGES_TO_FETCH) {
       const statusesApiUrl = `${baseStatusesUrl}?${currentParams.toString()}`;
-      const statusesUrl = proxify(statusesApiUrl);
-      const statusesResponse = await fetch(statusesUrl);
+      const statusesResponse = await fetchWithProxyFallbacks(statusesApiUrl, { cache: 'no-store' });
 
       if (!statusesResponse.ok) {
         throw new Error(`Erreur lors de la récupération des posts depuis ${RESOLVER_INSTANCE}. statut: ${statusesResponse.status}`);
@@ -116,6 +150,9 @@ export async function fetchAccountAndStatuses(
   } catch (error) {
     console.error("Mastodon API Error:", error);
     if (error instanceof Error) {
+        if (error.message.includes('Tous les proxies CORS ont échoué')) {
+            throw new Error("La connexion au service Mastodon a échoué. Tous les services proxy utilisés sont probablement hors ligne ou inaccessibles. Veuillez réessayer plus tard.");
+        }
         throw new Error(error.message);
     }
     throw new Error('Une erreur réseau ou API inattendue est survenue.');

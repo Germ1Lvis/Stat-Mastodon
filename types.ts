@@ -31,3 +31,29 @@ export interface MediaAttachment {
   preview_url: string;
   description: string | null;
 }
+
+// Types for X (Twitter)
+export interface XAccount {
+  id_str: string;
+  name: string;
+  screen_name: string;
+  profile_image_url_https: string;
+  followers_count: number;
+  friends_count: number;
+  statuses_count: number;
+}
+
+export interface Tweet {
+  id: string;
+  created_at: string;
+  text: string;
+  url: string;
+  reply_count: number;
+  retweet_count: number;
+  like_count: number;
+  view_count: number; // Impressions
+  user: {
+    id_str: string;
+    screen_name: string;
+  };
+}
